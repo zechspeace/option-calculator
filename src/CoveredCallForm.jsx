@@ -91,6 +91,7 @@ export default function CoveredCallForm() {
   const [selectedCall, setSelectedCall] = useState(null)
   const [selectedPut, setSelectedPut] = useState(null)
   const [activeTab, setActiveTab] = useState('call')
+  const [midOverride, setMidOverride] = useState('')
   const [refreshKey, setRefreshKey] = useState(0)
 
   function commitTicker(raw) {
@@ -148,9 +149,6 @@ export default function CoveredCallForm() {
         localStorage.setItem('ticker-history', JSON.stringify(next))
         return next
       })
-      setCalls([])
-      setSelectedCall(null)
-
       if (datesRes.status === 'fulfilled') {
         const { expirationDates, dividendYield: dy, tickerName: name } = datesRes.value
         setExpiryDates(expirationDates)
@@ -192,7 +190,7 @@ export default function CoveredCallForm() {
         setPuts([])
         setChainState('error')
       })
-  }, [ticker, selectedExpiry])
+  }, [ticker, selectedExpiry, refreshKey])
 
   // Scroll ATM row into view whenever a new chain loads or the tab toggles
   useEffect(() => {
@@ -207,12 +205,17 @@ export default function CoveredCallForm() {
   const hasAll = stockPrice !== null && selectedCall !== null && activeTab === 'call'
   const hasPutAll = selectedPut !== null && activeTab === 'put'
 
-  const mid = selectedCall ? ((selectedCall.bid ?? 0) + (selectedCall.ask ?? 0)) / 2 : null
+  const overrideVal = midOverride !== '' ? parseFloat(midOverride) : null
+  const mid = overrideVal != null && !isNaN(overrideVal)
+    ? overrideVal
+    : selectedCall ? ((selectedCall.bid ?? 0) + (selectedCall.ask ?? 0)) / 2 : null
   const roi = mid != null && dte > 0 ? ((mid / dte) * 365) / stockPrice : null
   const ccYield = roi != null && dte > 0 ? (dividendYield / 365 * dte) + roi : null
 
-  const putMid = selectedPut ? ((selectedPut.bid ?? 0) + (selectedPut.ask ?? 0)) / 2 : null
-  const securePutReturn = putMid != null && dte > 0 ? (putMid / selectedPut.strike / dte) * 365 : null
+  const putMid = overrideVal != null && !isNaN(overrideVal)
+    ? overrideVal
+    : selectedPut ? ((selectedPut.bid ?? 0) + (selectedPut.ask ?? 0)) / 2 : null
+  const securePutReturn = putMid != null && selectedPut && dte > 0 ? (putMid / selectedPut.strike / dte) * 365 : null
   const selDelta = selectedCall && stockPrice && dte != null
     ? callDelta(stockPrice, selectedCall.strike, dte / 365, selectedCall.impliedVolatility)
     : null
@@ -235,7 +238,7 @@ export default function CoveredCallForm() {
       <div className="w-full max-w-2xl">
 
         {/* Form card */}
-        <div className="bg-white rounded-2xl shadow-sm border border-gray-200 p-6 flex flex-col gap-6">
+        <div className="bg-white rounded-2xl border border-gray-300 p-6 flex flex-col gap-6">
 
           {/* Recent tickers */}
           {tickerHistory.length > 0 && (
@@ -296,7 +299,24 @@ export default function CoveredCallForm() {
               )}
             </div>
             {tickerName && (
-              <p className="text-2xl font-medium text-gray-500 mt-8">{tickerName}</p>
+              <div className="flex items-center gap-2 mt-8">
+                <p className="text-2xl font-medium text-gray-500">{tickerName}</p>
+                <button
+                  onClick={() => setRefreshKey(k => k + 1)}
+                  disabled={isRefreshing}
+                  title="Refresh"
+                  className="text-gray-400 hover:text-indigo-500 disabled:opacity-40 transition-colors"
+                >
+                  <svg
+                    viewBox="0 0 24 24"
+                    xmlns="http://www.w3.org/2000/svg"
+                    fill="currentColor"
+                    className={`w-[1.3rem] h-[1.3rem] translate-y-[2px] ${isRefreshing ? 'animate-spin' : ''}`}
+                  >
+                    <path d="M10 11H7.101l.001-.009a4.956 4.956 0 0 1 .752-1.787 5.054 5.054 0 0 1 2.2-1.811c.302-.128.617-.226.938-.291a5.078 5.078 0 0 1 2.018 0 4.978 4.978 0 0 1 2.525 1.361l1.416-1.412a7.036 7.036 0 0 0-2.224-1.501 6.921 6.921 0 0 0-1.315-.408 7.079 7.079 0 0 0-2.819 0 6.94 6.94 0 0 0-1.316.409 7.04 7.04 0 0 0-3.08 2.534 6.978 6.978 0 0 0-1.054 2.505c-.028.135-.043.273-.063.41H2l4 4 4-4zm4 2h2.899l-.001.008a4.976 4.976 0 0 1-2.103 3.138 4.943 4.943 0 0 1-1.787.752 5.073 5.073 0 0 1-2.017 0 4.956 4.956 0 0 1-1.787-.752 5.072 5.072 0 0 1-.74-.61L7.05 16.95a7.032 7.032 0 0 0 2.225 1.5c.424.18.867.317 1.315.408a7.07 7.07 0 0 0 2.818 0 7.031 7.031 0 0 0 4.395-2.945 6.974 6.974 0 0 0 1.053-2.503c.027-.135.043-.273.063-.41H22l-4-4-4 4z"/>
+                  </svg>
+                </button>
+              </div>
             )}
             {stockPrice !== null && (
               <div className="flex items-baseline justify-between mt-1">
@@ -366,21 +386,6 @@ export default function CoveredCallForm() {
                     </button>
                   ))}
                 </div>
-                <button
-                  onClick={() => setRefreshKey(k => k + 1)}
-                  disabled={isRefreshing}
-                  title="Refresh"
-                  className="text-gray-400 hover:text-indigo-500 disabled:opacity-40 transition-colors"
-                >
-                  <svg
-                    xmlns="http://www.w3.org/2000/svg"
-                    viewBox="0 0 20 20"
-                    fill="currentColor"
-                    className={`w-4 h-4 ${isRefreshing ? 'animate-spin' : ''}`}
-                  >
-                    <path fillRule="evenodd" d="M15.312 11.424a5.5 5.5 0 01-9.201 2.466l-.312-.311h2.433a.75.75 0 000-1.5H5.498a.75.75 0 00-.75.75v3.212a.75.75 0 001.5 0v-1.73l.31.31a7 7 0 0011.712-3.138.75.75 0 00-1.449-.39zm1.23-3.723a.75.75 0 00.219-.53V3.928a.75.75 0 00-1.5 0v1.73l-.31-.31A7 7 0 003.239 8.485a.75.75 0 101.449.39A5.5 5.5 0 0113.89 6.11l.311.31h-2.432a.75.75 0 000 1.5h3.574a.75.75 0 00.53-.219z" clipRule="evenodd" />
-                  </svg>
-                </button>
               </div>
 
               {chainState === 'loading' && (
@@ -442,7 +447,7 @@ export default function CoveredCallForm() {
                               <tr
                                 key={c.contractSymbol}
                                 ref={isAtm ? atmRowRef : undefined}
-                                onClick={() => setSelectedCall(c)}
+                                onClick={() => { setSelectedCall(c); setMidOverride('') }}
                                 className={`cursor-pointer transition-colors ${
                                   isSelected
                                     ? 'bg-indigo-50'
@@ -539,7 +544,7 @@ export default function CoveredCallForm() {
                               <tr
                                 key={p.contractSymbol}
                                 ref={isAtm ? atmRowRef : undefined}
-                                onClick={() => setSelectedPut(p)}
+                                onClick={() => { setSelectedPut(p); setMidOverride('') }}
                                 className={`cursor-pointer transition-colors ${
                                   isSelected
                                     ? 'bg-indigo-50'
@@ -593,9 +598,27 @@ export default function CoveredCallForm() {
 
         </div>
 
+        {/* Mid price override */}
+        {(hasAll || hasPutAll) && (
+          <div className="mt-4">
+            <div className="relative flex items-center w-1/2 ml-auto">
+              <span className="absolute right-3 top-1/2 -translate-y-1/2 bg-gray-100 text-gray-400 text-xs px-[0.55rem] py-[0.138rem] rounded border border-gray-300 pointer-events-none">Mid price override</span>
+              <span className="absolute left-4 text-gray-400 pointer-events-none">$</span>
+              <input
+                type="number"
+                value={midOverride}
+                onChange={e => setMidOverride(e.target.value)}
+                min="0"
+                step="0.01"
+                className="w-full rounded-xl border border-gray-300 bg-white pl-7 pr-4 py-3 text-gray-900 outline-none focus:border-indigo-400 focus:ring-2 focus:ring-indigo-100 transition placeholder:text-gray-300"
+              />
+            </div>
+          </div>
+        )}
+
         {/* ROI result — calls */}
         {hasAll && (
-          <div className="mt-4 bg-white rounded-2xl shadow-sm border border-gray-200 px-6 py-5 flex justify-around items-center gap-4">
+          <div className="mt-4 bg-white rounded-2xl border border-gray-300 px-6 py-5 flex justify-around items-center gap-4 w-fit ml-auto">
             <div className="text-center">
               <p className="text-xs font-semibold text-gray-700 tracking-wide uppercase mb-1">CC ROI (Annulized)</p>
               <p className="text-4xl font-bold text-gray-900">{roi != null ? fmt2(roi * 100) + '%' : '—'}</p>
@@ -610,7 +633,7 @@ export default function CoveredCallForm() {
 
         {/* ROI result — puts */}
         {hasPutAll && (
-          <div className="mt-4 bg-white rounded-2xl shadow-sm border border-gray-200 px-6 py-5 flex justify-around items-center gap-4">
+          <div className="mt-4 bg-white rounded-2xl border border-gray-300 px-6 py-5 flex justify-around items-center gap-4 w-fit ml-auto">
             <div className="text-center">
               <p className="text-xs font-semibold text-gray-700 tracking-wide uppercase mb-1">Secure Put Return (Annualized)</p>
               <p className="text-4xl font-bold text-gray-900">{securePutReturn != null ? fmt2(securePutReturn * 100) + '%' : '—'}</p>
