@@ -15,5 +15,7 @@ export async function fetchStockPrice(ticker) {
   if (!result) throw new Error('Ticker not found')
   const price = result.meta.regularMarketPrice
   const currency = result.meta.currency ?? 'USD'
-  return { price, currency }
+  const previousClose = result.meta.chartPreviousClose ?? result.meta.previousClose ?? price
+  const changePercent = ((price - previousClose) / previousClose) * 100
+  return { price, currency, changePercent }
 }

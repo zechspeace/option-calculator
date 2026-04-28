@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from 'react'
 import { fetchStockPrice } from './utils/fetchStockPrice'
-import { fetchExpiryDates, fetchCallsForExpiry } from './utils/fetchOptionChain'
+import { fetchExpiryDates, fetchCallsForExpiry, fetchPutsForExpiry } from './utils/fetchOptionChain'
 
 const RISK_FREE = 0.045
 
@@ -16,6 +16,10 @@ function callDelta(S, K, T, sigma) {
   if (T <= 0 || sigma <= 0) return S > K ? 1 : 0
   const d1 = (Math.log(S / K) + (RISK_FREE + 0.5 * sigma * sigma) * T) / (sigma * Math.sqrt(T))
   return normalCDF(d1)
+}
+
+function putDelta(S, K, T, sigma) {
+  return callDelta(S, K, T, sigma) - 1
 }
 
 function tsToDte(ts) {
@@ -67,10 +71,12 @@ function loadHistory() {
 }
 
 export default function CoveredCallForm() {
+  const [tickerInput, setTickerInput] = useState('')
   const [ticker, setTicker] = useState('')
   const [tickerHistory, setTickerHistory] = useState(loadHistory)
   const [stockPrice, setStockPrice] = useState(null)
   const [currency, setCurrency] = useState('USD')
+  const [changePercent, setChangePercent] = useState(null)
   const [fetchState, setFetchState] = useState('idle') // idle | loading | error
   const [fetchError, setFetchError] = useState('')
 
@@ -81,10 +87,17 @@ export default function CoveredCallForm() {
 
   const [chainState, setChainState] = useState('idle') // idle | loading | error
   const [calls, setCalls] = useState([])
+  const [puts, setPuts] = useState([])
   const [selectedCall, setSelectedCall] = useState(null)
+  const [selectedPut, setSelectedPut] = useState(null)
+  const [activeTab, setActiveTab] = useState('call')
   const [refreshKey, setRefreshKey] = useState(0)
 
-  const debounceRef = useRef(null)
+  function commitTicker(raw) {
+    const sym = raw.trim().toUpperCase()
+    setTickerInput(sym)
+    setTicker(sym)
+  }
   const atmRowRef = useRef(null)
 
   const isRefreshing = fetchState === 'loading' || chainState === 'loading'
@@ -94,6 +107,7 @@ export default function CoveredCallForm() {
     const sym = ticker.trim()
     if (!sym) {
       setStockPrice(null)
+      setChangePercent(null)
       setExpiryDates([])
       setSelectedExpiry(null)
       setDividendYield(0)
@@ -103,11 +117,10 @@ export default function CoveredCallForm() {
       setFetchState('idle')
       return
     }
-    clearTimeout(debounceRef.current)
-    debounceRef.current = setTimeout(async () => {
-      setFetchState('loading')
-      setFetchError('')
+    setFetchState('loading')
+    setFetchError('')
 
+    ;(async () => {
       const [priceRes, datesRes] = await Promise.allSettled([
         fetchStockPrice(sym),
         fetchExpiryDates(sym),
@@ -115,6 +128,7 @@ export default function CoveredCallForm() {
 
       if (priceRes.status === 'rejected') {
         setStockPrice(null)
+        setChangePercent(null)
         setExpiryDates([])
         setSelectedExpiry(null)
         setCalls([])
@@ -124,9 +138,10 @@ export default function CoveredCallForm() {
         return
       }
 
-      const { price, currency: cur } = priceRes.value
+      const { price, currency: cur, changePercent: chg } = priceRes.value
       setStockPrice(price)
       setCurrency(cur)
+      setChangePercent(chg ?? null)
       setFetchState('idle')
       setTickerHistory(prev => {
         const next = [sym.toUpperCase(), ...prev.filter(t => t !== sym.toUpperCase())].slice(0, MAX_HISTORY)
@@ -150,49 +165,67 @@ export default function CoveredCallForm() {
         setSelectedExpiry(null)
         setChainState('error')
       }
-    }, 600)
-    return () => clearTimeout(debounceRef.current)
+    })()
   }, [ticker, refreshKey])
 
-  // Fetch call chain whenever expiry selection changes
+  // Fetch call + put chains whenever expiry selection changes
   useEffect(() => {
     if (!ticker.trim() || !selectedExpiry) {
       setCalls([])
+      setPuts([])
       return
     }
     setChainState('loading')
     setSelectedCall(null)
-    fetchCallsForExpiry(ticker.trim(), selectedExpiry)
-      .then(rawCalls => {
+    setSelectedPut(null)
+    Promise.all([
+      fetchCallsForExpiry(ticker.trim(), selectedExpiry),
+      fetchPutsForExpiry(ticker.trim(), selectedExpiry),
+    ])
+      .then(([rawCalls, rawPuts]) => {
         setCalls(rawCalls)
+        setPuts(rawPuts)
         setChainState('idle')
       })
       .catch(() => {
         setCalls([])
+        setPuts([])
         setChainState('error')
       })
   }, [ticker, selectedExpiry])
 
-  // Scroll ATM row into view whenever a new chain loads
+  // Scroll ATM row into view whenever a new chain loads or the tab toggles
   useEffect(() => {
-    if (calls.length) atmRowRef.current?.scrollIntoView({ block: 'center', behavior: 'instant' })
-  }, [calls])
+    const id = setTimeout(() => {
+      atmRowRef.current?.scrollIntoView({ block: 'center', behavior: 'instant' })
+    }, 0)
+    return () => clearTimeout(id)
+  }, [calls, puts, activeTab])
 
   const dte = selectedExpiry ? tsToDte(selectedExpiry) : null
   const curSymbol = currency === 'USD' ? '$' : currency + ' '
-  const hasAll = stockPrice !== null && selectedCall !== null
+  const hasAll = stockPrice !== null && selectedCall !== null && activeTab === 'call'
+  const hasPutAll = selectedPut !== null && activeTab === 'put'
 
   const mid = selectedCall ? ((selectedCall.bid ?? 0) + (selectedCall.ask ?? 0)) / 2 : null
   const roi = mid != null && dte > 0 ? ((mid / dte) * 365) / stockPrice : null
   const ccYield = roi != null && dte > 0 ? (dividendYield / 365 * dte) + roi : null
+
+  const putMid = selectedPut ? ((selectedPut.bid ?? 0) + (selectedPut.ask ?? 0)) / 2 : null
+  const securePutReturn = putMid != null && dte > 0 ? (putMid / selectedPut.strike / dte) * 365 : null
   const selDelta = selectedCall && stockPrice && dte != null
     ? callDelta(stockPrice, selectedCall.strike, dte / 365, selectedCall.impliedVolatility)
     : null
 
   const sortedCalls = [...calls].sort((a, b) => b.strike - a.strike)
+  const sortedPuts = [...puts].sort((a, b) => b.strike - a.strike)
 
   const atmStrike = stockPrice && calls.length
     ? calls.reduce((a, b) =>
+        Math.abs(a.strike - stockPrice) < Math.abs(b.strike - stockPrice) ? a : b
+      ).strike
+    : stockPrice && puts.length
+    ? puts.reduce((a, b) =>
         Math.abs(a.strike - stockPrice) < Math.abs(b.strike - stockPrice) ? a : b
       ).strike
     : null
@@ -210,7 +243,7 @@ export default function CoveredCallForm() {
               {tickerHistory.map(t => (
                 <button
                   key={t}
-                  onClick={() => setTicker(t)}
+                  onClick={() => commitTicker(t)}
                   className={`rounded-full px-3 py-1 text-xs font-semibold border transition-colors ${
                     ticker === t
                       ? 'bg-indigo-600 text-white border-indigo-600'
@@ -239,8 +272,13 @@ export default function CoveredCallForm() {
             <div className="relative flex items-center">
               <input
                 type="text"
-                value={ticker}
-                onChange={e => setTicker(e.target.value.toUpperCase())}
+                value={tickerInput}
+                onChange={e => {
+                  const val = e.target.value.toUpperCase()
+                  setTickerInput(val)
+                  if (val === '') setTicker('')
+                }}
+                onKeyDown={e => { if (e.key === 'Enter') commitTicker(tickerInput) }}
                 placeholder="AAPL"
                 maxLength={10}
                 className="w-full rounded-xl border border-gray-300 bg-white px-4 py-3 text-lg font-semibold tracking-widest text-gray-900 outline-none focus:border-indigo-400 focus:ring-2 focus:ring-indigo-100 transition uppercase placeholder:font-normal placeholder:tracking-normal placeholder:text-gray-300"
@@ -266,7 +304,11 @@ export default function CoveredCallForm() {
                   <span className="text-2xl font-bold text-gray-900">
                     {curSymbol}{fmt2(stockPrice)}
                   </span>
-                  <span className="text-sm text-gray-400">current price</span>
+                  {changePercent != null && (
+                    <span className={`text-sm font-medium ${changePercent >= 0 ? 'text-emerald-600' : 'text-red-500'}`}>
+                      {changePercent >= 0 ? '+' : ''}{changePercent.toFixed(2)}%
+                    </span>
+                  )}
                 </div>
                 {expiryDates.length > 0 && (
                   <div className="text-right">
@@ -305,12 +347,25 @@ export default function CoveredCallForm() {
           )}
 
           {/* Option chain table */}
-          {(chainState === 'loading' || calls.length > 0 || chainState === 'error') && (
+          {(chainState === 'loading' || calls.length > 0 || puts.length > 0 || chainState === 'error') && (
             <div className="flex flex-col gap-2">
               <div className="flex items-center justify-between">
-                <p className="text-sm font-semibold text-gray-700 tracking-wide uppercase">
-                  Call Options — Select a Strike
-                </p>
+                {/* Nav pill toggle */}
+                <div className="flex items-center bg-gray-100 rounded-lg p-0.5 gap-0.5">
+                  {['call', 'put'].map(tab => (
+                    <button
+                      key={tab}
+                      onClick={() => setActiveTab(tab)}
+                      className={`px-3 py-1 text-sm font-medium rounded-md transition-colors capitalize ${
+                        activeTab === tab
+                          ? 'bg-white text-gray-900 shadow-sm'
+                          : 'text-gray-500 hover:text-gray-700'
+                      }`}
+                    >
+                      {tab.charAt(0).toUpperCase() + tab.slice(1)}
+                    </button>
+                  ))}
+                </div>
                 <button
                   onClick={() => setRefreshKey(k => k + 1)}
                   disabled={isRefreshing}
@@ -340,10 +395,10 @@ export default function CoveredCallForm() {
                 </div>
               )}
 
-              {chainState === 'idle' && calls.length > 0 && (
+              {chainState === 'idle' && activeTab === 'call' && calls.length > 0 && (
                 <>
                   <div className="overflow-auto rounded-xl border border-gray-200" style={{ maxHeight: 320 }}>
-                    <table className="w-full text-sm text-left">
+                    <table className="w-full text-left" style={{ fontSize: 13 }}>
                       <thead className="sticky top-0 bg-gray-50 border-b border-gray-200 z-10">
                         <tr>
                           <th className="px-3 py-2.5 font-semibold text-gray-600">Strike</th>
@@ -356,56 +411,76 @@ export default function CoveredCallForm() {
                         </tr>
                       </thead>
                       <tbody>
-                        {sortedCalls.map(c => {
+                        {sortedCalls.map((c, i) => {
                           const isSelected = selectedCall?.contractSymbol === c.contractSymbol
                           const isAtm = c.strike === atmStrike
                           const d = stockPrice && dte != null
                             ? callDelta(stockPrice, c.strike, dte / 365, c.impliedVolatility)
                             : null
                           const midPrice = ((c.bid ?? 0) + (c.ask ?? 0)) / 2
+                          const showPriceLine = stockPrice != null && i > 0
+                            && sortedCalls[i - 1].strike > stockPrice
+                            && c.strike <= stockPrice
 
                           return (
-                            <tr
-                              key={c.contractSymbol}
-                              ref={isAtm ? atmRowRef : undefined}
-                              onClick={() => setSelectedCall(c)}
-                              className={`cursor-pointer border-b border-gray-100 last:border-0 transition-colors ${
-                                isSelected
-                                  ? 'bg-indigo-50'
-                                  : isAtm
-                                  ? 'bg-amber-50 hover:bg-amber-100'
-                                  : 'hover:bg-gray-50'
-                              }`}
-                            >
-                              <td className={`px-3 py-2 font-semibold ${isSelected ? 'text-indigo-700' : isAtm ? 'text-amber-700' : 'text-gray-900'}`}>
-                                ${fmt2(c.strike)}
-                                {isAtm && (
-                                  <span className="ml-1.5 text-xs font-normal text-amber-500">ATM</span>
-                                )}
-                              </td>
-                              <td className="px-3 py-2 text-right tabular-nums">
-                                {(() => {
-                                  const pct = ((c.strike - stockPrice) / stockPrice) * 100
-                                  const color = pct > 0 ? 'text-emerald-600' : pct < 0 ? 'text-red-500' : 'text-gray-400'
-                                  return <span className={color}>{pct > 0 ? '+' : ''}{pct.toFixed(2)}%</span>
-                                })()}
-                              </td>
-                              <td className="px-3 py-2 text-gray-600 text-right tabular-nums">
-                                {(c.openInterest ?? 0).toLocaleString()}
-                              </td>
-                              <td className="px-3 py-2 text-gray-600 text-right tabular-nums">
-                                {(c.volume ?? 0).toLocaleString()}
-                              </td>
-                              <td className="px-3 py-2 text-gray-600 text-right tabular-nums">
-                                {(c.impliedVolatility * 100).toFixed(1)}%
-                              </td>
-                              <td className="px-3 py-2 text-gray-600 text-right tabular-nums">
-                                {d != null ? d.toFixed(2) : '—'}
-                              </td>
-                              <td className="px-3 py-2 font-medium text-right tabular-nums text-gray-900">
-                                ${fmt2(midPrice)}
-                              </td>
-                            </tr>
+                            <>
+                              {showPriceLine && (
+                                <tr key="__price_line" className="bg-white">
+                                  <td className="pl-[2px] pr-3 py-1.5" colSpan={7}>
+                                    <div className="flex items-center gap-2">
+                                    <span className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-sm font-semibold flex-shrink-0 ${changePercent >= 0 ? 'bg-emerald-50 text-emerald-700' : 'bg-red-50 text-red-600'}`}>
+                                      {curSymbol}{fmt2(stockPrice)}
+                                      {changePercent != null && (
+                                        <span>{changePercent >= 0 ? '+' : ''}{changePercent.toFixed(2)}%</span>
+                                      )}
+                                    </span>
+                                    <div className="flex-1 border-t border-gray-300" />
+                                    </div>
+                                  </td>
+                                </tr>
+                              )}
+                              <tr
+                                key={c.contractSymbol}
+                                ref={isAtm ? atmRowRef : undefined}
+                                onClick={() => setSelectedCall(c)}
+                                className={`cursor-pointer transition-colors ${
+                                  isSelected
+                                    ? 'bg-indigo-50'
+                                    : isAtm
+                                    ? 'bg-amber-50 hover:bg-amber-200'
+                                    : 'hover:bg-gray-200'
+                                }`}
+                              >
+                                <td className={`px-3 py-2 font-semibold ${isSelected ? 'text-indigo-700' : isAtm ? 'text-amber-700' : 'text-gray-900'}`}>
+                                  ${fmt2(c.strike)}
+                                  {isAtm && (
+                                    <span className="ml-1.5 text-xs font-normal text-amber-500">ATM</span>
+                                  )}
+                                </td>
+                                <td className="px-3 py-2 text-right tabular-nums">
+                                  {(() => {
+                                    const pct = ((c.strike - stockPrice) / stockPrice) * 100
+                                    const color = pct > 0 ? 'text-emerald-600' : pct < 0 ? 'text-red-500' : 'text-gray-400'
+                                    return <span className={color}>{pct > 0 ? '+' : ''}{pct.toFixed(2)}%</span>
+                                  })()}
+                                </td>
+                                <td className="px-3 py-2 text-gray-600 text-right tabular-nums">
+                                  {(c.openInterest ?? 0).toLocaleString()}
+                                </td>
+                                <td className="px-3 py-2 text-gray-600 text-right tabular-nums">
+                                  {(c.volume ?? 0).toLocaleString()}
+                                </td>
+                                <td className="px-3 py-2 text-gray-600 text-right tabular-nums">
+                                  {(c.impliedVolatility * 100).toFixed(1)}%
+                                </td>
+                                <td className="px-3 py-2 text-gray-600 text-right tabular-nums">
+                                  {d != null ? d.toFixed(2) : '—'}
+                                </td>
+                                <td className="px-3 py-2 font-medium text-right tabular-nums text-gray-900">
+                                  ${fmt2(midPrice)}
+                                </td>
+                              </tr>
+                            </>
                           )
                         })}
                       </tbody>
@@ -416,12 +491,109 @@ export default function CoveredCallForm() {
                   )}
                 </>
               )}
+
+              {chainState === 'idle' && activeTab === 'put' && puts.length > 0 && (
+                <>
+                  <div className="overflow-auto rounded-xl border border-gray-200" style={{ maxHeight: 320 }}>
+                    <table className="w-full text-left" style={{ fontSize: 13 }}>
+                      <thead className="sticky top-0 bg-gray-50 border-b border-gray-200 z-10">
+                        <tr>
+                          <th className="px-3 py-2.5 font-semibold text-gray-600">Strike</th>
+                          <th className="px-3 py-2.5 font-semibold text-gray-600 text-right">% Diff</th>
+                          <th className="px-3 py-2.5 font-semibold text-gray-600 text-right">OI</th>
+                          <th className="px-3 py-2.5 font-semibold text-gray-600 text-right">Volume</th>
+                          <th className="px-3 py-2.5 font-semibold text-gray-600 text-right">IV</th>
+                          <th className="px-3 py-2.5 font-semibold text-gray-600 text-right">Delta</th>
+                          <th className="px-3 py-2.5 font-semibold text-gray-600 text-right">Mid</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {sortedPuts.map((p, i) => {
+                          const isSelected = selectedPut?.contractSymbol === p.contractSymbol
+                          const isAtm = p.strike === atmStrike
+                          const d = stockPrice && dte != null
+                            ? putDelta(stockPrice, p.strike, dte / 365, p.impliedVolatility)
+                            : null
+                          const midPrice = ((p.bid ?? 0) + (p.ask ?? 0)) / 2
+                          const showPriceLine = stockPrice != null && i > 0
+                            && sortedPuts[i - 1].strike > stockPrice
+                            && p.strike <= stockPrice
+
+                          return (
+                            <>
+                              {showPriceLine && (
+                                <tr key="__price_line" className="bg-white">
+                                  <td className="pl-[2px] pr-3 py-1.5" colSpan={7}>
+                                    <div className="flex items-center gap-2">
+                                    <span className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-sm font-semibold flex-shrink-0 ${changePercent >= 0 ? 'bg-emerald-50 text-emerald-700' : 'bg-red-50 text-red-600'}`}>
+                                      {curSymbol}{fmt2(stockPrice)}
+                                      {changePercent != null && (
+                                        <span>{changePercent >= 0 ? '+' : ''}{changePercent.toFixed(2)}%</span>
+                                      )}
+                                    </span>
+                                    <div className="flex-1 border-t border-gray-300" />
+                                    </div>
+                                  </td>
+                                </tr>
+                              )}
+                              <tr
+                                key={p.contractSymbol}
+                                ref={isAtm ? atmRowRef : undefined}
+                                onClick={() => setSelectedPut(p)}
+                                className={`cursor-pointer transition-colors ${
+                                  isSelected
+                                    ? 'bg-indigo-50'
+                                    : isAtm
+                                    ? 'bg-amber-50 hover:bg-amber-200'
+                                    : 'hover:bg-gray-200'
+                                }`}
+                              >
+                                <td className={`px-3 py-2 font-semibold ${isSelected ? 'text-indigo-700' : isAtm ? 'text-amber-700' : 'text-gray-900'}`}>
+                                  ${fmt2(p.strike)}
+                                  {isAtm && (
+                                    <span className="ml-1.5 text-xs font-normal text-amber-500">ATM</span>
+                                  )}
+                                </td>
+                                <td className="px-3 py-2 text-right tabular-nums">
+                                  {(() => {
+                                    const pct = ((p.strike - stockPrice) / stockPrice) * 100
+                                    const color = pct > 0 ? 'text-emerald-600' : pct < 0 ? 'text-red-500' : 'text-gray-400'
+                                    return <span className={color}>{pct > 0 ? '+' : ''}{pct.toFixed(2)}%</span>
+                                  })()}
+                                </td>
+                                <td className="px-3 py-2 text-gray-600 text-right tabular-nums">
+                                  {(p.openInterest ?? 0).toLocaleString()}
+                                </td>
+                                <td className="px-3 py-2 text-gray-600 text-right tabular-nums">
+                                  {(p.volume ?? 0).toLocaleString()}
+                                </td>
+                                <td className="px-3 py-2 text-gray-600 text-right tabular-nums">
+                                  {(p.impliedVolatility * 100).toFixed(1)}%
+                                </td>
+                                <td className="px-3 py-2 text-gray-600 text-right tabular-nums">
+                                  {d != null ? d.toFixed(2) : '—'}
+                                </td>
+                                <td className="px-3 py-2 font-medium text-right tabular-nums text-gray-900">
+                                  ${fmt2(midPrice)}
+                                </td>
+                              </tr>
+                            </>
+                          )
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                  {!selectedPut && (
+                    <p className="text-xs text-gray-400 text-center">Click a row to select a strike</p>
+                  )}
+                </>
+              )}
             </div>
           )}
 
         </div>
 
-        {/* ROI result */}
+        {/* ROI result — calls */}
         {hasAll && (
           <div className="mt-4 bg-white rounded-2xl shadow-sm border border-gray-200 px-6 py-5 flex justify-around items-center gap-4">
             <div className="text-center">
@@ -432,6 +604,16 @@ export default function CoveredCallForm() {
             <div className="text-center">
               <p className="text-xs font-semibold text-gray-700 tracking-wide uppercase mb-1">CC + Yield</p>
               <p className="text-4xl font-bold text-gray-900">{ccYield != null ? fmt2(ccYield * 100) + '%' : '—'}</p>
+            </div>
+          </div>
+        )}
+
+        {/* ROI result — puts */}
+        {hasPutAll && (
+          <div className="mt-4 bg-white rounded-2xl shadow-sm border border-gray-200 px-6 py-5 flex justify-around items-center gap-4">
+            <div className="text-center">
+              <p className="text-xs font-semibold text-gray-700 tracking-wide uppercase mb-1">Secure Put Return (Annualized)</p>
+              <p className="text-4xl font-bold text-gray-900">{securePutReturn != null ? fmt2(securePutReturn * 100) + '%' : '—'}</p>
             </div>
           </div>
         )}
