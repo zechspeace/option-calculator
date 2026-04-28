@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef } from 'react'
 import { fetchStockPrice } from './utils/fetchStockPrice'
+import { fetchTickerSearch } from './utils/fetchTickerSearch'
 import { fetchExpiryDates, fetchCallsForExpiry, fetchPutsForExpiry } from './utils/fetchOptionChain'
 
 const RISK_FREE = 0.045
@@ -74,6 +75,9 @@ export default function CoveredCallForm() {
   const [tickerInput, setTickerInput] = useState('')
   const [ticker, setTicker] = useState('')
   const [tickerHistory, setTickerHistory] = useState(loadHistory)
+  const [showAc, setShowAc] = useState(false)
+  const [acIndex, setAcIndex] = useState(-1)
+  const [acResults, setAcResults] = useState([])
   const [stockPrice, setStockPrice] = useState(null)
   const [currency, setCurrency] = useState('USD')
   const [changePercent, setChangePercent] = useState(null)
@@ -98,8 +102,20 @@ export default function CoveredCallForm() {
     const sym = raw.trim().toUpperCase()
     setTickerInput(sym)
     setTicker(sym)
+    setAcResults([])
+    setShowAc(false)
   }
   const atmRowRef = useRef(null)
+
+  // Debounced autocomplete search
+  useEffect(() => {
+    const q = tickerInput.trim()
+    if (!q || !showAc) { setAcResults([]); return }
+    const id = setTimeout(() => {
+      fetchTickerSearch(q).then(setAcResults).catch(() => setAcResults([]))
+    }, 200)
+    return () => clearTimeout(id)
+  }, [tickerInput, showAc])
 
   const isRefreshing = fetchState === 'loading' || chainState === 'loading'
 
@@ -244,17 +260,39 @@ export default function CoveredCallForm() {
           {tickerHistory.length > 0 && (
             <div className="flex flex-wrap gap-2">
               {tickerHistory.map(t => (
-                <button
+                <div
                   key={t}
-                  onClick={() => commitTicker(t)}
-                  className={`rounded-full px-3 py-1 text-xs font-semibold border transition-colors ${
+                  className={`group relative inline-flex items-center justify-center rounded-full border text-xs font-semibold transition-colors px-3 py-1 ${
                     ticker === t
                       ? 'bg-indigo-600 text-white border-indigo-600'
                       : 'bg-gray-100 text-gray-600 border-gray-200 hover:bg-indigo-50 hover:text-indigo-600 hover:border-indigo-200'
                   }`}
                 >
-                  {t}
-                </button>
+                  <button
+                    onClick={() => commitTicker(t)}
+                    className="transition-transform group-hover:-translate-x-1.5"
+                  >
+                    {t}
+                  </button>
+                  <button
+                    onClick={() => {
+                      setTickerHistory(prev => {
+                        const next = prev.filter(h => h !== t)
+                        localStorage.setItem('ticker-history', JSON.stringify(next))
+                        return next
+                      })
+                      if (ticker === t) { setTicker(''); setTickerInput('') }
+                    }}
+                    className={`absolute right-1.5 opacity-0 group-hover:opacity-100 transition-opacity cursor-pointer ${
+                      ticker === t ? 'text-indigo-200 hover:text-white' : 'text-gray-400 hover:text-red-500'
+                    }`}
+                    aria-label={`Remove ${t}`}
+                  >
+                    <svg viewBox="0 0 8 8" className="w-2.5 h-2.5" fill="none">
+                      <path d="M1 1l6 6M7 1L1 7" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/>
+                    </svg>
+                  </button>
+                </div>
               ))}
             </div>
           )}
@@ -272,30 +310,75 @@ export default function CoveredCallForm() {
                 : 'e.g. AAPL, MSFT, TSLA'
             }
           >
-            <div className="relative flex items-center">
-              <input
-                type="text"
-                value={tickerInput}
-                onChange={e => {
-                  const val = e.target.value.toUpperCase()
-                  setTickerInput(val)
-                  if (val === '') setTicker('')
-                }}
-                onKeyDown={e => { if (e.key === 'Enter') commitTicker(tickerInput) }}
-                placeholder="AAPL"
-                maxLength={10}
-                className="w-full rounded-xl border border-gray-300 bg-white px-4 py-3 text-lg font-semibold tracking-widest text-gray-900 outline-none focus:border-indigo-400 focus:ring-2 focus:ring-indigo-100 transition uppercase placeholder:font-normal placeholder:tracking-normal placeholder:text-gray-300"
-              />
-              {fetchState === 'loading' && (
-                <span className="absolute right-3 text-gray-400 animate-spin text-lg">⟳</span>
-              )}
-              {fetchState === 'error' && (
-                <span className="absolute right-3 text-red-400 text-lg">✕</span>
-              )}
-              {stockPrice !== null && fetchState === 'idle' && (
-                <span className="absolute right-3">
-                  <Badge color="green">✓ {curSymbol}{fmt2(stockPrice)}</Badge>
-                </span>
+            <div className="relative">
+              <div className="relative flex items-center">
+                <input
+                  type="text"
+                  value={tickerInput}
+                  onChange={e => {
+                    const val = e.target.value.toUpperCase()
+                    setTickerInput(val)
+                    setAcIndex(-1)
+                    setShowAc(true)
+                    if (val === '') setTicker('')
+                  }}
+                  onFocus={() => setShowAc(true)}
+                  onBlur={() => setTimeout(() => setShowAc(false), 150)}
+                  onKeyDown={e => {
+                    if (showAc && acResults.length > 0) {
+                      if (e.key === 'ArrowDown') {
+                        e.preventDefault()
+                        setAcIndex(i => Math.min(i + 1, acResults.length - 1))
+                        return
+                      }
+                      if (e.key === 'ArrowUp') {
+                        e.preventDefault()
+                        setAcIndex(i => Math.max(i - 1, -1))
+                        return
+                      }
+                      if (e.key === 'Escape') {
+                        setShowAc(false)
+                        setAcIndex(-1)
+                        return
+                      }
+                      if (e.key === 'Enter' && acIndex >= 0) {
+                        commitTicker(acResults[acIndex].symbol)
+                        return
+                      }
+                    }
+                    if (e.key === 'Enter') commitTicker(tickerInput)
+                  }}
+                  placeholder="AAPL"
+                  maxLength={10}
+                  className="w-full rounded-xl border border-gray-300 bg-white px-4 py-3 text-lg font-semibold tracking-widest text-gray-900 outline-none focus:border-indigo-400 focus:ring-2 focus:ring-indigo-100 transition uppercase placeholder:font-normal placeholder:tracking-normal placeholder:text-gray-300"
+                />
+                {fetchState === 'loading' && (
+                  <span className="absolute right-3 text-gray-400 animate-spin text-lg">⟳</span>
+                )}
+                {fetchState === 'error' && (
+                  <span className="absolute right-3 text-red-400 text-lg">✕</span>
+                )}
+              </div>
+              {showAc && acResults.length > 0 && (
+                <ul className="absolute z-20 mt-1 w-full bg-white border border-gray-200 rounded-xl shadow-lg overflow-hidden">
+                  {acResults.map((r, i) => (
+                    <li
+                      key={r.symbol}
+                      onMouseDown={() => commitTicker(r.symbol)}
+                      onMouseEnter={() => setAcIndex(i)}
+                      className={`flex items-baseline gap-2 px-4 py-2.5 cursor-pointer transition-colors ${
+                        i === acIndex ? 'bg-indigo-50' : 'hover:bg-gray-50'
+                      }`}
+                    >
+                      <span className={`text-sm font-semibold tracking-widest ${i === acIndex ? 'text-indigo-700' : 'text-gray-900'}`}>
+                        {r.symbol}
+                      </span>
+                      {r.name && (
+                        <span className="text-xs text-gray-400 truncate">{r.name}</span>
+                      )}
+                    </li>
+                  ))}
+                </ul>
               )}
             </div>
             {tickerName && (
