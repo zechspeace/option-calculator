@@ -1,16 +1,45 @@
-# React + Vite
+# Covered Call ROI Calculator
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+A web app for evaluating covered call options. Enter a stock ticker, pick an expiration date, select a strike from the live option chain, and instantly see the annualized ROI.
 
-Currently, two official plugins are available:
+## What it does
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+1. **Fetches live data** — stock price and available option expiration dates are pulled from Yahoo Finance when you type a ticker (600 ms debounce).
+2. **Shows the option chain** — all call strikes for the selected expiry, with open interest, volume, IV, Black-Scholes delta, and mid price. The at-the-money row is highlighted and scrolled into view automatically.
+3. **Calculates ROI** — click any strike to see:
+   - **CC ROI (annualized):** `(mid / DTE × 365) / stock price`
+   - **CC + Yield:** combines the above with the stock's trailing dividend yield pro-rated to the DTE
 
-## React Compiler
+Recent tickers are saved to `localStorage` and shown as quick-select chips.
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+## Getting started
 
-## Expanding the ESLint configuration
+```bash
+npm install
+npm run dev
+```
 
-If you are developing a production application, we recommend using TypeScript with type-aware lint rules enabled. Check out the [TS template](https://github.com/vitejs/vite/tree/main/packages/create-vite/template-react-ts) for information on how to integrate TypeScript and [`typescript-eslint`](https://typescript-eslint.io) in your project.
+Open [http://localhost:5173](http://localhost:5173).
+
+Other commands:
+
+```bash
+npm run build      # Production build
+npm run preview    # Preview production build
+npm run lint       # ESLint
+```
+
+## How the Yahoo Finance proxy works
+
+Yahoo Finance requires cookies and a session crumb for authenticated API calls. The dev server handles this transparently:
+
+- Stock price requests (`/api/yahoo/...`) are forwarded via Vite's built-in proxy.
+- Option chain requests (`/api/options/:symbol`) go through a custom Vite middleware that negotiates and caches a Yahoo session (cookies + crumb) server-side for 25 minutes, with automatic refresh on expiry.
+
+**This proxy only runs in dev.** Deploying to production requires a real backend that replicates this session logic.
+
+## Stack
+
+- React 19 + Vite
+- Tailwind CSS v4
+- Black-Scholes delta computed client-side (Abramowitz & Stegun approximation, risk-free rate hardcoded at 4.5%)
