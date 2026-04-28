@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(fuser -k 5173/tcp)",
+      "Bash(npm --prefix /home/stephenchiu/workspace/my-option-calculator run dev -- --port 5173)",
+      "Bash(python3 -c \"import sys,json; d=json.load\\(sys.stdin\\); print\\(d['chart']['result'][0]['meta']['regularMarketPrice'], d['chart']['result'][0]['meta']['currency']\\)\")",
+      "Bash(pkill -f \"node.*vite\")",
+      "Bash(npm run *)",
+      "Bash(curl -s http://localhost:5173/)"
+    ]
+  }
+}
