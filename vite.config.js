@@ -2,6 +2,7 @@ import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
 import https from 'node:https'
+import { isCanadianSymbol, getCanadianOptionChain } from './server/canadianOptions.js'
 
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
 
@@ -63,13 +64,28 @@ function yahooOptionsPlugin() {
           const url = new URL(req.url, 'http://localhost')
           const symbol = url.pathname.split('/')[3]?.toUpperCase()
           const date = url.searchParams.get('date')
+          const market = url.searchParams.get('market')?.toUpperCase()
 
           if (!symbol) {
             res.writeHead(400, { 'Content-Type': 'application/json' })
             return res.end(JSON.stringify({ error: 'Missing symbol' }))
           }
 
-          let { cookieStr, crumb } = await getSession()
+          let session = null
+          try {
+            session = await getSession()
+          } catch {
+            // Session is optional for MX options data
+          }
+
+          if (isCanadianSymbol(symbol, market)) {
+            const caData = await getCanadianOptionChain(symbol, date, session, httpsGet)
+            res.writeHead(200, { 'Content-Type': 'application/json' })
+            return res.end(JSON.stringify(caData))
+          }
+
+          if (!session) session = await getSession()
+          let { cookieStr, crumb } = session
 
           const buildPath = (c) => {
             const u = new URL(`https://query2.finance.yahoo.com/v7/finance/options/${encodeURIComponent(symbol)}`)
@@ -89,6 +105,20 @@ function yahooOptionsPlugin() {
             ;({ cookieStr, crumb } = await getSession())
             yfRes = await httpsGet(buildPath(crumb), { Cookie: cookieStr })
             data = JSON.parse(yfRes.body)
+          }
+
+          // If Yahoo returned no expiration dates, check if Montreal Exchange has options
+          const expDates = data?.optionChain?.result?.[0]?.expirationDates
+          if (!expDates || expDates.length === 0) {
+            try {
+              const caData = await getCanadianOptionChain(symbol, date, { cookieStr, crumb }, httpsGet)
+              if (caData?.optionChain?.result?.[0]?.expirationDates?.length > 0) {
+                res.writeHead(200, { 'Content-Type': 'application/json' })
+                return res.end(JSON.stringify(caData))
+              }
+            } catch {
+              // Return original response
+            }
           }
 
           res.writeHead(200, { 'Content-Type': 'application/json' })

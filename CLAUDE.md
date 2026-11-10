@@ -17,14 +17,20 @@ There is no test framework configured.
 
 This is a React 19 + Vite app styled with Tailwind CSS v4. The entire UI is a single component — `src/CoveredCallForm.jsx` — mounted directly from `App.jsx`. There are no routes.
 
-### Yahoo Finance proxy
+### Yahoo Finance & Montreal Exchange proxy
 
-Yahoo Finance requires cookies and a crumb token for authenticated requests. Since the browser can't make these requests directly (CORS + cookie negotiation), all Yahoo Finance calls are proxied through Vite's dev server:
+US option chains are pulled from Yahoo Finance (requiring session cookies and a crumb token), while Canadian stock option chains (TSX/TSXV) are pulled from the **Bourse de Montréal (Montréal Exchange - MX)** via `server/canadianOptions.js` because Yahoo Finance does not provide option chain data for Canadian tickers.
 
-- **`/api/yahoo/*`** — handled by Vite's built-in `server.proxy`, forwarded to `query2.finance.yahoo.com`. Used by `fetchStockPrice.js` for the chart/price endpoint.
-- **`/api/options/:symbol`** — handled by `yahooOptionsPlugin()` in `vite.config.js`. This is a custom Vite middleware that maintains a server-side Yahoo session (cookies + crumb) cached for 25 minutes. It initializes the session via `fc.yahoo.com` (a lightweight endpoint that avoids Node's 16 KB header-overflow limit). Used by `fetchOptionChain.js`.
+Both dev (`vite.config.js` via `yahooOptionsPlugin`) and production (`server.js`) handle:
+- **`/api/yahoo/*`** — forwarded to `query2.finance.yahoo.com` for charts/prices.
+- **`/api/search`** — forwarded to `query2.finance.yahoo.com/v1/finance/search` for ticker autocomplete, supporting both US and Canadian markets (`region: CA` / `US`) and displaying exchange badges (`TSX`, `NYSE`, `NASDAQ`, etc.).
+- **`/api/options/:symbol`** — automatically routes to Montreal Exchange for Canadian symbols (e.g. `SHOP.TO`, `RY.TO`, `XIU.TO`, or when `market=CA`) or falls back from Yahoo Finance if no US options are returned. Caches parsed MX chains in-memory for 5 minutes.
 
-**This proxy only runs in dev.** A production deployment needs a real backend to replicate `yahooOptionsPlugin`.
+### Canadian Stock Support
+- **Market Selector**: The user can toggle between **US (NYSE/NASDAQ)** and **Canada (TSX/MX)**.
+- **Auto-Detection**: Entering tickers ending in `.TO`, `.V`, etc. automatically sets Canada mode.
+- **Symbol Normalization**: In Canada mode, typing `SHOP` or `RY` automatically normalizes to `SHOP.TO` / `RY.TO` for TSX quotes and MX option chains.
+- **Currency**: CAD (`C$`) is formatted for Canadian stocks and USD (`$`) for US stocks across all price, strike, and mid-price displays.
 
 ### Data flow
 
@@ -32,7 +38,7 @@ Yahoo Finance requires cookies and a crumb token for authenticated requests. Sin
 2. `fetchExpiryDates` returns Unix timestamps (seconds) for available expirations; the app auto-selects the first expiry >25 DTE.
 3. Selecting an expiry triggers `fetchCallsForExpiry`, which fetches the full call chain for that date.
 4. User clicks a row in the option chain table to select a strike.
-5. ROI is computed inline: annualized `(mid / dte * 365) / stockPrice`, plus combined CC+yield.
+5. ROI is computed inline: annualized `(mid / dte * 365) / stockPrice`, plus combined CC+yield (`roi + dividendYield`).
 
 ### Black-Scholes delta
 
@@ -44,4 +50,4 @@ Contains helpers (`thirdFriday`, `nextStandardExpiry`, `calcDte`, `toInputDate`)
 
 ### Ticker history
 
-Up to 10 recently looked-up tickers are persisted to `localStorage` under the key `ticker-history` and shown as quick-select chips above the input.
+Up to 10 recently looked-up tickers are persisted to `localStorage` under the key `ticker-history` as `{ symbol, market }` objects and shown as quick-select chips above the input (decorated with flag badges: 🇨🇦 / 🇺🇸). Clicking any saved chip automatically switches the app to that ticker's corresponding exchange (TSX vs NYSE/NASDAQ) and loads its data without manual switching. Existing legacy string histories are automatically migrated on load.

@@ -2,6 +2,7 @@ import express from 'express'
 import https from 'node:https'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { isCanadianSymbol, getCanadianOptionChain } from './server/canadianOptions.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const app = express()
@@ -90,10 +91,23 @@ app.get('/api/search', (req, res) => {
 // /api/options/:symbol?date= — session-authenticated options chain
 app.get('/api/options/:symbol', async (req, res) => {
   const symbol = req.params.symbol.toUpperCase()
-  const { date } = req.query
+  const { date, market } = req.query
 
   try {
-    let { cookieStr, crumb } = await getSession()
+    let session = null
+    try {
+      session = await getSession()
+    } catch {
+      // Session is optional for MX options data
+    }
+
+    if (isCanadianSymbol(symbol, market?.toUpperCase())) {
+      const caData = await getCanadianOptionChain(symbol, date, session, httpsGet)
+      return res.json(caData)
+    }
+
+    if (!session) session = await getSession()
+    let { cookieStr, crumb } = session
 
     const buildUrl = (c) => {
       const u = new URL(`https://query2.finance.yahoo.com/v7/finance/options/${encodeURIComponent(symbol)}`)
@@ -112,6 +126,19 @@ app.get('/api/options/:symbol', async (req, res) => {
       ;({ cookieStr, crumb } = await getSession())
       yfRes = await httpsGet(buildUrl(crumb), { Cookie: cookieStr })
       data = JSON.parse(yfRes.body)
+    }
+
+    // If Yahoo returned no expiration dates, check if Montreal Exchange has options
+    const expDates = data?.optionChain?.result?.[0]?.expirationDates
+    if (!expDates || expDates.length === 0) {
+      try {
+        const caData = await getCanadianOptionChain(symbol, date, { cookieStr, crumb }, httpsGet)
+        if (caData?.optionChain?.result?.[0]?.expirationDates?.length > 0) {
+          return res.json(caData)
+        }
+      } catch {
+        // Return original response
+      }
     }
 
     res.json(data)

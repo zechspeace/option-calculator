@@ -1,11 +1,12 @@
-export async function fetchExpiryDates(ticker) {
+export async function fetchExpiryDates(ticker, market) {
   const sym = encodeURIComponent(ticker.trim().toUpperCase())
-  const res = await fetch(`/api/options/${sym}`)
+  const qs = market ? `?market=${encodeURIComponent(market)}` : ''
+  const res = await fetch(`/api/options/${sym}${qs}`)
   if (!res.ok) throw new Error(`Server error (${res.status})`)
   const json = await res.json()
   if (json?.error) throw new Error(json.error)
   const result = json?.optionChain?.result?.[0]
-  if (!result) throw new Error('No options data available')
+  if (!result || !result.expirationDates?.length) throw new Error('No options data available')
   return {
     expirationDates: result.expirationDates ?? [],
     dividendYield: result.quote?.trailingAnnualDividendYield ?? 0,
@@ -13,9 +14,13 @@ export async function fetchExpiryDates(ticker) {
   }
 }
 
-async function fetchOptionsForExpiry(ticker, timestamp) {
+async function fetchOptionsForExpiry(ticker, timestamp, market) {
   const sym = encodeURIComponent(ticker.trim().toUpperCase())
-  const res = await fetch(`/api/options/${sym}?date=${timestamp}`)
+  const params = new URLSearchParams()
+  if (timestamp) params.set('date', timestamp)
+  if (market) params.set('market', market)
+  const qs = params.toString() ? `?${params.toString()}` : ''
+  const res = await fetch(`/api/options/${sym}${qs}`)
   if (!res.ok) throw new Error(`Server error (${res.status})`)
   const json = await res.json()
   if (json?.error) throw new Error(json.error)
@@ -24,12 +29,12 @@ async function fetchOptionsForExpiry(ticker, timestamp) {
   return result.options?.[0] ?? {}
 }
 
-export async function fetchCallsForExpiry(ticker, timestamp) {
-  const opts = await fetchOptionsForExpiry(ticker, timestamp)
+export async function fetchCallsForExpiry(ticker, timestamp, market) {
+  const opts = await fetchOptionsForExpiry(ticker, timestamp, market)
   return opts.calls ?? []
 }
 
-export async function fetchPutsForExpiry(ticker, timestamp) {
-  const opts = await fetchOptionsForExpiry(ticker, timestamp)
+export async function fetchPutsForExpiry(ticker, timestamp, market) {
+  const opts = await fetchOptionsForExpiry(ticker, timestamp, market)
   return opts.puts ?? []
 }

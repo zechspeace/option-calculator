@@ -68,10 +68,49 @@ function Badge({ children, color = 'gray' }) {
 const MAX_HISTORY = 10
 
 function loadHistory() {
-  try { return JSON.parse(localStorage.getItem('ticker-history') ?? '[]') } catch { return [] }
+  try {
+    const raw = JSON.parse(localStorage.getItem('ticker-history') ?? '[]')
+    if (!Array.isArray(raw)) return []
+    return raw
+      .map(item => {
+        if (typeof item === 'string') {
+          const clean = item.trim().toUpperCase()
+          const isCa = isCanadianTicker(clean)
+          return {
+            symbol: clean,
+            market: isCa ? 'CA' : 'US',
+          }
+        }
+        if (item && typeof item === 'object' && item.symbol) {
+          const clean = String(item.symbol).trim().toUpperCase()
+          const isCa = item.market === 'CA' || isCanadianTicker(clean)
+          return {
+            symbol: clean,
+            market: isCa ? 'CA' : 'US',
+          }
+        }
+        return null
+      })
+      .filter(Boolean)
+  } catch {
+    return []
+  }
+}
+
+function isCanadianTicker(sym = '') {
+  return /\.(TO|VN|V|NE|CN)$/i.test(sym.trim())
+}
+
+function getOptionMid(opt) {
+  if (!opt) return null
+  if (opt.bid > 0 && opt.ask > 0) return (opt.bid + opt.ask) / 2
+  if (opt.bid > 0) return opt.bid
+  if (opt.ask > 0) return opt.ask
+  return opt.lastPrice ?? 0
 }
 
 export default function CoveredCallForm() {
+  const [market, setMarket] = useState('US') // 'US' | 'CA'
   const [tickerInput, setTickerInput] = useState('')
   const [ticker, setTicker] = useState('')
   const [tickerHistory, setTickerHistory] = useState(loadHistory)
@@ -98,50 +137,104 @@ export default function CoveredCallForm() {
   const [midOverride, setMidOverride] = useState('')
   const [refreshKey, setRefreshKey] = useState(0)
 
-  function commitTicker(raw) {
-    const sym = raw.trim().toUpperCase()
+  function commitTicker(raw, explicitMarket) {
+    let sym = raw.trim().toUpperCase()
+    if (!sym) return
+
+    let targetMarket = explicitMarket || (isCanadianTicker(sym) ? 'CA' : market)
+    if (isCanadianTicker(sym)) {
+      targetMarket = 'CA'
+    } else if (targetMarket === 'CA' && !sym.includes('.')) {
+      sym = `${sym}.TO`
+    }
+
+    if (targetMarket !== market) {
+      setMarket(targetMarket)
+    }
+
     setTickerInput(sym)
     setTicker(sym)
     setAcResults([])
     setShowAc(false)
   }
+
+  function handleMarketChange(nextMarket) {
+    if (nextMarket === market) return
+    setMarket(nextMarket)
+    if (nextMarket === 'CA' && ticker && !isCanadianTicker(ticker)) {
+      commitTicker(`${ticker}.TO`, 'CA')
+    } else if (nextMarket === 'US' && ticker && isCanadianTicker(ticker)) {
+      const base = ticker.replace(/\.(TO|VN|V|NE|CN)$/i, '')
+      commitTicker(base, 'US')
+    }
+  }
+
   const atmRowRef = useRef(null)
 
   // Debounced autocomplete search
   useEffect(() => {
+    let cancelled = false
     const q = tickerInput.trim()
-    if (!q || !showAc) { setAcResults([]); return }
+    if (!q || !showAc) {
+      queueMicrotask(() => {
+        if (!cancelled) setAcResults([])
+      })
+      return () => { cancelled = true }
+    }
     const id = setTimeout(() => {
-      fetchTickerSearch(q).then(setAcResults).catch(() => setAcResults([]))
+      fetchTickerSearch(q, market)
+        .then(res => {
+          if (!cancelled) setAcResults(res)
+        })
+        .catch(() => {
+          if (!cancelled) setAcResults([])
+        })
     }, 200)
-    return () => clearTimeout(id)
-  }, [tickerInput, showAc])
+    return () => {
+      cancelled = true
+      clearTimeout(id)
+    }
+  }, [tickerInput, showAc, market])
 
   const isRefreshing = fetchState === 'loading' || chainState === 'loading'
 
   // Fetch stock price + available expiry dates when ticker changes
   useEffect(() => {
+    let cancelled = false
     const sym = ticker.trim()
     if (!sym) {
-      setStockPrice(null)
-      setChangePercent(null)
-      setExpiryDates([])
-      setSelectedExpiry(null)
-      setDividendYield(0)
-      setTickerName('')
-      setCalls([])
-      setSelectedCall(null)
-      setFetchState('idle')
-      return
+      queueMicrotask(() => {
+        if (cancelled) return
+        setStockPrice(null)
+        setChangePercent(null)
+        setExpiryDates([])
+        setSelectedExpiry(null)
+        setDividendYield(0)
+        setTickerName('')
+        setCalls([])
+        setPuts([])
+        setSelectedCall(null)
+        setSelectedPut(null)
+        setFetchState('idle')
+      })
+      return () => { cancelled = true }
     }
-    setFetchState('loading')
-    setFetchError('')
+
+    queueMicrotask(() => {
+      if (!cancelled) {
+        setFetchState('loading')
+        setFetchError('')
+      }
+    })
 
     ;(async () => {
+      const currentMarket = isCanadianTicker(sym) ? 'CA' : market
       const [priceRes, datesRes] = await Promise.allSettled([
         fetchStockPrice(sym),
-        fetchExpiryDates(sym),
+        fetchExpiryDates(sym, currentMarket),
       ])
+
+      if (cancelled) return
 
       if (priceRes.status === 'rejected') {
         setStockPrice(null)
@@ -149,7 +242,9 @@ export default function CoveredCallForm() {
         setExpiryDates([])
         setSelectedExpiry(null)
         setCalls([])
+        setPuts([])
         setSelectedCall(null)
+        setSelectedPut(null)
         setFetchError(priceRes.reason?.message ?? 'Failed to fetch')
         setFetchState('error')
         return
@@ -160,8 +255,13 @@ export default function CoveredCallForm() {
       setCurrency(cur)
       setChangePercent(chg ?? null)
       setFetchState('idle')
+      const savedSymbol = currentMarket === 'CA' && !sym.includes('.') ? `${sym}.TO` : sym
       setTickerHistory(prev => {
-        const next = [sym.toUpperCase(), ...prev.filter(t => t !== sym.toUpperCase())].slice(0, MAX_HISTORY)
+        const entry = { symbol: savedSymbol.toUpperCase(), market: currentMarket }
+        const next = [
+          entry,
+          ...prev.filter(item => !(item.symbol === entry.symbol && item.market === entry.market)),
+        ].slice(0, MAX_HISTORY)
         localStorage.setItem('ticker-history', JSON.stringify(next))
         return next
       })
@@ -180,33 +280,49 @@ export default function CoveredCallForm() {
         setChainState('error')
       }
     })()
-  }, [ticker, refreshKey])
+
+    return () => { cancelled = true }
+  }, [ticker, market, refreshKey])
 
   // Fetch call + put chains whenever expiry selection changes
   useEffect(() => {
+    let cancelled = false
     if (!ticker.trim() || !selectedExpiry) {
-      setCalls([])
-      setPuts([])
-      return
+      queueMicrotask(() => {
+        if (cancelled) return
+        setCalls([])
+        setPuts([])
+      })
+      return () => { cancelled = true }
     }
-    setChainState('loading')
-    setSelectedCall(null)
-    setSelectedPut(null)
+    queueMicrotask(() => {
+      if (!cancelled) {
+        setChainState('loading')
+        setSelectedCall(null)
+        setSelectedPut(null)
+      }
+    })
+
+    const currentMarket = isCanadianTicker(ticker) ? 'CA' : market
     Promise.all([
-      fetchCallsForExpiry(ticker.trim(), selectedExpiry),
-      fetchPutsForExpiry(ticker.trim(), selectedExpiry),
+      fetchCallsForExpiry(ticker.trim(), selectedExpiry, currentMarket),
+      fetchPutsForExpiry(ticker.trim(), selectedExpiry, currentMarket),
     ])
       .then(([rawCalls, rawPuts]) => {
+        if (cancelled) return
         setCalls(rawCalls)
         setPuts(rawPuts)
         setChainState('idle')
       })
       .catch(() => {
+        if (cancelled) return
         setCalls([])
         setPuts([])
         setChainState('error')
       })
-  }, [ticker, selectedExpiry, refreshKey])
+
+    return () => { cancelled = true }
+  }, [ticker, selectedExpiry, market, refreshKey])
 
   // Scroll ATM row into view whenever a new chain loads or the tab toggles
   useEffect(() => {
@@ -217,24 +333,21 @@ export default function CoveredCallForm() {
   }, [calls, puts, activeTab])
 
   const dte = selectedExpiry ? tsToDte(selectedExpiry) : null
-  const curSymbol = currency === 'USD' ? '$' : currency + ' '
+  const curSymbol = currency === 'CAD' ? 'C$' : currency === 'USD' ? '$' : currency + ' '
   const hasAll = stockPrice !== null && selectedCall !== null && activeTab === 'call'
   const hasPutAll = selectedPut !== null && activeTab === 'put'
 
   const overrideVal = midOverride !== '' ? parseFloat(midOverride) : null
   const mid = overrideVal != null && !isNaN(overrideVal)
     ? overrideVal
-    : selectedCall ? ((selectedCall.bid ?? 0) + (selectedCall.ask ?? 0)) / 2 : null
+    : selectedCall ? getOptionMid(selectedCall) : null
   const roi = mid != null && dte > 0 ? ((mid / dte) * 365) / stockPrice : null
-  const ccYield = roi != null && dte > 0 ? (dividendYield / 365 * dte) + roi : null
+  const ccYield = roi != null ? roi + (dividendYield ?? 0) : null
 
   const putMid = overrideVal != null && !isNaN(overrideVal)
     ? overrideVal
-    : selectedPut ? ((selectedPut.bid ?? 0) + (selectedPut.ask ?? 0)) / 2 : null
+    : selectedPut ? getOptionMid(selectedPut) : null
   const securePutReturn = putMid != null && selectedPut && dte > 0 ? (putMid / selectedPut.strike / dte) * 365 : null
-  const selDelta = selectedCall && stockPrice && dte != null
-    ? callDelta(stockPrice, selectedCall.strike, dte / 365, selectedCall.impliedVolatility)
-    : null
 
   const sortedCalls = [...calls].sort((a, b) => b.strike - a.strike)
   const sortedPuts = [...puts].sort((a, b) => b.strike - a.strike)
@@ -256,44 +369,84 @@ export default function CoveredCallForm() {
         {/* Form card */}
         <div className="bg-white rounded-2xl border border-gray-300 p-6 flex flex-col gap-6">
 
+          {/* Market selector */}
+          <div className="flex items-center justify-between pb-3 border-b border-gray-100">
+            <span className="text-xs font-semibold text-gray-500 uppercase tracking-wider">
+              Market
+            </span>
+            <div className="flex items-center bg-gray-100 rounded-lg p-0.5 gap-0.5">
+              <button
+                type="button"
+                onClick={() => handleMarketChange('US')}
+                className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-md transition-all ${
+                  market === 'US'
+                    ? 'bg-white text-gray-900 shadow-sm'
+                    : 'text-gray-500 hover:text-gray-700'
+                }`}
+              >
+                <span>🇺🇸</span>
+                <span>US (NYSE/NASDAQ)</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => handleMarketChange('CA')}
+                className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-md transition-all ${
+                  market === 'CA'
+                    ? 'bg-white text-gray-900 shadow-sm'
+                    : 'text-gray-500 hover:text-gray-700'
+                }`}
+              >
+                <span>🇨🇦</span>
+                <span>Canada (TSX/MX)</span>
+              </button>
+            </div>
+          </div>
+
           {/* Recent tickers */}
           {tickerHistory.length > 0 && (
             <div className="flex flex-wrap gap-2">
-              {tickerHistory.map(t => (
-                <div
-                  key={t}
-                  className={`group relative inline-flex items-center justify-center rounded-full border text-xs font-semibold transition-colors px-3 py-1 ${
-                    ticker === t
-                      ? 'bg-indigo-600 text-white border-indigo-600'
-                      : 'bg-gray-100 text-gray-600 border-gray-200 hover:bg-indigo-50 hover:text-indigo-600 hover:border-indigo-200'
-                  }`}
-                >
-                  <button
-                    onClick={() => commitTicker(t)}
-                    className="transition-transform group-hover:-translate-x-1.5"
-                  >
-                    {t}
-                  </button>
-                  <button
-                    onClick={() => {
-                      setTickerHistory(prev => {
-                        const next = prev.filter(h => h !== t)
-                        localStorage.setItem('ticker-history', JSON.stringify(next))
-                        return next
-                      })
-                      if (ticker === t) { setTicker(''); setTickerInput('') }
-                    }}
-                    className={`absolute right-1.5 opacity-0 group-hover:opacity-100 transition-opacity cursor-pointer ${
-                      ticker === t ? 'text-indigo-200 hover:text-white' : 'text-gray-400 hover:text-red-500'
+              {tickerHistory.map(item => {
+                const isSelected = ticker === item.symbol && market === item.market
+                return (
+                  <div
+                    key={`${item.market}-${item.symbol}`}
+                    className={`group relative inline-flex items-center justify-center rounded-full border text-xs font-semibold transition-colors pl-2.5 pr-2 py-1 ${
+                      isSelected
+                        ? 'bg-indigo-600 text-white border-indigo-600'
+                        : 'bg-gray-100 text-gray-600 border-gray-200 hover:bg-indigo-50 hover:text-indigo-600 hover:border-indigo-200'
                     }`}
-                    aria-label={`Remove ${t}`}
                   >
-                    <svg viewBox="0 0 8 8" className="w-2.5 h-2.5" fill="none">
-                      <path d="M1 1l6 6M7 1L1 7" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/>
-                    </svg>
-                  </button>
-                </div>
-              ))}
+                    <button
+                      onClick={() => commitTicker(item.symbol, item.market)}
+                      className="transition-transform group-hover:-translate-x-1.5 flex items-center gap-1.5 cursor-pointer"
+                    >
+                      <span className="text-[11px] leading-none">{item.market === 'CA' ? '🇨🇦' : '🇺🇸'}</span>
+                      <span>{item.symbol}</span>
+                    </button>
+                    <button
+                      onClick={() => {
+                        setTickerHistory(prev => {
+                          const next = prev.filter(h => !(h.symbol === item.symbol && h.market === item.market))
+                          localStorage.setItem('ticker-history', JSON.stringify(next))
+                          return next
+                        })
+                        if (ticker === item.symbol && market === item.market) {
+                          setTicker('')
+                          setTickerInput('')
+                        }
+                      }}
+                      className={`absolute right-1.5 opacity-0 group-hover:opacity-100 transition-opacity cursor-pointer ${
+                        isSelected ? 'text-indigo-200 hover:text-white' : 'text-gray-400 hover:text-red-500'
+                      }`}
+                      aria-label={`Remove ${item.symbol}`}
+                    >
+                      <svg viewBox="0 0 8 8" className="w-2.5 h-2.5" fill="none">
+                        <path d="M1 1l6 6M7 1L1 7" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/>
+                      </svg>
+                    </button>
+                  </div>
+                )
+              })}
             </div>
           )}
 
@@ -307,6 +460,8 @@ export default function CoveredCallForm() {
                 ? 'Fetching data…'
                 : stockPrice !== null
                 ? null
+                : market === 'CA'
+                ? 'e.g. SHOP.TO, RY.TO, XIU.TO (or SHOP, RY)'
                 : 'e.g. AAPL, MSFT, TSLA'
             }
           >
@@ -342,14 +497,15 @@ export default function CoveredCallForm() {
                         return
                       }
                       if (e.key === 'Enter' && acIndex >= 0) {
-                        commitTicker(acResults[acIndex].symbol)
+                        const target = acResults[acIndex]
+                        commitTicker(target.symbol, target.isCanadian ? 'CA' : undefined)
                         return
                       }
                     }
                     if (e.key === 'Enter') commitTicker(tickerInput)
                   }}
-                  placeholder="AAPL"
-                  maxLength={10}
+                  placeholder={market === 'CA' ? 'SHOP.TO' : 'AAPL'}
+                  maxLength={15}
                   className="w-full rounded-xl border border-gray-300 bg-white px-4 py-3 text-lg font-semibold tracking-widest text-gray-900 outline-none focus:border-indigo-400 focus:ring-2 focus:ring-indigo-100 transition uppercase placeholder:font-normal placeholder:tracking-normal placeholder:text-gray-300"
                 />
                 {fetchState === 'loading' && (
@@ -364,17 +520,24 @@ export default function CoveredCallForm() {
                   {acResults.map((r, i) => (
                     <li
                       key={r.symbol}
-                      onMouseDown={() => commitTicker(r.symbol)}
+                      onMouseDown={() => commitTicker(r.symbol, r.isCanadian ? 'CA' : undefined)}
                       onMouseEnter={() => setAcIndex(i)}
-                      className={`flex items-baseline gap-2 px-4 py-2.5 cursor-pointer transition-colors ${
+                      className={`flex items-baseline justify-between gap-2 px-4 py-2.5 cursor-pointer transition-colors ${
                         i === acIndex ? 'bg-indigo-50' : 'hover:bg-gray-50'
                       }`}
                     >
-                      <span className={`text-sm font-semibold tracking-widest ${i === acIndex ? 'text-indigo-700' : 'text-gray-900'}`}>
-                        {r.symbol}
-                      </span>
-                      {r.name && (
-                        <span className="text-xs text-gray-400 truncate">{r.name}</span>
+                      <div className="flex items-baseline gap-2 truncate">
+                        <span className={`text-sm font-semibold tracking-widest ${i === acIndex ? 'text-indigo-700' : 'text-gray-900'}`}>
+                          {r.symbol}
+                        </span>
+                        {r.name && (
+                          <span className="text-xs text-gray-400 truncate">{r.name}</span>
+                        )}
+                      </div>
+                      {r.exchange && (
+                        <span className="text-[10px] uppercase font-bold px-1.5 py-0.5 rounded bg-gray-100 text-gray-600 flex-shrink-0">
+                          {r.exchange}
+                        </span>
                       )}
                     </li>
                   ))}
@@ -505,7 +668,7 @@ export default function CoveredCallForm() {
                           const d = stockPrice && dte != null
                             ? callDelta(stockPrice, c.strike, dte / 365, c.impliedVolatility)
                             : null
-                          const midPrice = ((c.bid ?? 0) + (c.ask ?? 0)) / 2
+                          const midPrice = getOptionMid(c)
                           const showPriceLine = stockPrice != null && i > 0
                             && sortedCalls[i - 1].strike > stockPrice
                             && c.strike <= stockPrice
@@ -540,7 +703,7 @@ export default function CoveredCallForm() {
                                 }`}
                               >
                                 <td className={`px-3 py-2 font-semibold ${isSelected ? 'text-indigo-700' : isAtm ? 'text-amber-700' : 'text-gray-900'}`}>
-                                  ${fmt2(c.strike)}
+                                  {curSymbol}{fmt2(c.strike)}
                                   {isAtm && (
                                     <span className="ml-1.5 text-xs font-normal text-amber-500">ATM</span>
                                   )}
@@ -565,7 +728,7 @@ export default function CoveredCallForm() {
                                   {d != null ? d.toFixed(2) : '—'}
                                 </td>
                                 <td className="px-3 py-2 font-medium text-right tabular-nums text-gray-900">
-                                  ${fmt2(midPrice)}
+                                  {curSymbol}{fmt2(midPrice)}
                                 </td>
                               </tr>
                             </>
@@ -602,7 +765,7 @@ export default function CoveredCallForm() {
                           const d = stockPrice && dte != null
                             ? putDelta(stockPrice, p.strike, dte / 365, p.impliedVolatility)
                             : null
-                          const midPrice = ((p.bid ?? 0) + (p.ask ?? 0)) / 2
+                          const midPrice = getOptionMid(p)
                           const showPriceLine = stockPrice != null && i > 0
                             && sortedPuts[i - 1].strike > stockPrice
                             && p.strike <= stockPrice
@@ -637,7 +800,7 @@ export default function CoveredCallForm() {
                                 }`}
                               >
                                 <td className={`px-3 py-2 font-semibold ${isSelected ? 'text-indigo-700' : isAtm ? 'text-amber-700' : 'text-gray-900'}`}>
-                                  ${fmt2(p.strike)}
+                                  {curSymbol}{fmt2(p.strike)}
                                   {isAtm && (
                                     <span className="ml-1.5 text-xs font-normal text-amber-500">ATM</span>
                                   )}
@@ -662,7 +825,7 @@ export default function CoveredCallForm() {
                                   {d != null ? d.toFixed(2) : '—'}
                                 </td>
                                 <td className="px-3 py-2 font-medium text-right tabular-nums text-gray-900">
-                                  ${fmt2(midPrice)}
+                                  {curSymbol}{fmt2(midPrice)}
                                 </td>
                               </tr>
                             </>
@@ -686,7 +849,7 @@ export default function CoveredCallForm() {
           <div className="mt-4">
             <div className="relative flex items-center w-1/2 ml-auto">
               <span className="absolute right-3 top-1/2 -translate-y-1/2 bg-gray-100 text-gray-400 text-xs px-[0.55rem] py-[0.138rem] rounded border border-gray-300 pointer-events-none">Mid price override</span>
-              <span className="absolute left-4 text-gray-400 pointer-events-none">$</span>
+              <span className="absolute left-4 text-gray-400 pointer-events-none">{curSymbol}</span>
               <input
                 type="number"
                 value={midOverride}
@@ -703,7 +866,7 @@ export default function CoveredCallForm() {
         {hasAll && (
           <div className="mt-4 bg-white rounded-2xl border border-gray-300 px-6 py-5 flex justify-around items-center gap-4 w-fit ml-auto">
             <div className="text-center">
-              <p className="text-xs font-semibold text-gray-700 tracking-wide uppercase mb-1">CC ROI (Annulized)</p>
+              <p className="text-xs font-semibold text-gray-700 tracking-wide uppercase mb-1">CC ROI (Annualized)</p>
               <p className="text-4xl font-bold text-gray-900">{roi != null ? fmt2(roi * 100) + '%' : '—'}</p>
             </div>
             <div className="w-px bg-gray-200 self-stretch" />
